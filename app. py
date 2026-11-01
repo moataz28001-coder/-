@@ -1,0 +1,114 @@
+import os
+from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
+
+# تعديل مهم: عشان يقرا ملفات HTML من نفس الفولدر
+app = Flask(__name__, template_folder='.')
+app.config['SECRET_KEY'] = 'change-this-to-a-random-secret-key' 
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
+db = SQLAlchemy(app)
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True, nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
+    role = db.Column(db.String(50), default='viewer')
+
+class Document(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    doc_number = db.Column(db.String(50))
+    date = db.Column(db.String(50))
+    department = db.Column(db.String(100))
+    file_url = db.Column(db.String(500))
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+def role_required(role):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not current_user.is_authenticated or current_user.role != role:
+                flash('غير مصرح لك بالدخول لهذه الصفحة', 'danger')
+                return redirect(url_for('index'))
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+@app.route('/')
+@login_required
+def index():
+    docs = Document.query.all()
+    return render_template('index.html', docs=docs)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        user = User.query.filter_by(username=request.form['username']).first()
+        if user and check_password_hash(user.password_hash, request.form['password']):
+            login_user(user)
+            return redirect(url_for('index'))
+        flash('اسم المستخدم أو كلمة المرور غير صحيحة', 'danger')
+    return render_template('login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+@app.route('/admin', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def admin():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        role = request.form['role']
+        if User.query.filter_by(username=username).first():
+            flash('المستخدم موجود بالفعل', 'danger')
+        else:
+            new_user = User(username=username, password_hash=generate_password_hash(password), role=role)
+            db.session.add(new_user)
+            db.session.commit()
+            flash('تم إضافة المستخدم بنجاح', 'success')
+    users = User.query.all()
+    return render_template('admin.html', users=users)
+
+@app.route('/add_doc', methods=['POST'])
+@login_required
+def add_doc():
+    if current_user.role not in ['admin', 'editor']:
+        flash('ليس لديك صلاحية الإضافة', 'danger')
+        return redirect(url_for('index'))
+        
+    title = request.form['title']
+    doc_number = request.form['doc_number']
+    date = request.form['date']
+    department = request.form['department']
+    file_url = request.form['file_url'] 
+    
+    new_doc = Document(title=title, doc_number=doc_number, date=date, department=department, file_url=file_url)
+    db.session.add(new_doc)
+    db.session.commit()
+    flash('تم حفظ المستند بنجاح', 'success')
+    return redirect(url_for('index'))
+
+with app.app_context():
+    db.create_all()
+    if not User.query.filter_by(username='admin').first():
+        admin = User(username='admin', password_hash=generate_password_hash('admin123'), role='admin')
+        db.session.add(admin)
+        db.session.commit()
+
+if __name__ == '__main__':
+    app.run(debug=True)
